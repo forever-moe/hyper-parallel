@@ -397,6 +397,33 @@ class TorchMegaKernelProfiler:
         self._pending.append(call)
         return call
 
+    def acquire_eventless_call(
+        self,
+        runtime: _PreparedMegaKernelRuntime,
+        device_reference: Any,
+        direction: str,
+    ) -> _MegaKernelCall:
+        """Reserve profiling state for a MegaKernel without scheduler events."""
+        if len(self._pending) >= self._max_pending_calls:
+            self._drain(keep=self._action is not ProfilerAction.WARMUP)
+        invocation_id = self._next_invocation_id
+        profile_buffer, profile_buffer_key = self._take_profile_buffer(runtime, device_reference)
+        self._next_invocation_id += 1
+        call = _MegaKernelCall(
+            runtime_config=runtime.profile_tensor,
+            event_counters=None,
+            clear_event_counters=None,
+            profiler=self,
+            profile_buffer=profile_buffer,
+            runtime=runtime,
+            direction=direction,
+            step=self._step,
+            profile_buffer_key=profile_buffer_key,
+            invocation_id=invocation_id,
+        )
+        self._pending.append(call)
+        return call
+
     def complete_call(self, call: _MegaKernelCall) -> None:
         """Validate that a successfully launched call belongs to this session.
 
@@ -601,6 +628,54 @@ def prepare_mega_kernel_call(
         fallback_event_counters,
         direction,
     )
+
+
+def prepare_eventless_mega_kernel_call(
+    runtime: _PreparedMegaKernelRuntime,
+    *,
+    direction: str,
+    profile_placeholder: Any,
+) -> _MegaKernelCall:
+    """Select launch arguments for a MegaKernel with no scheduler event storage.
+
+    Args:
+        runtime: Prepared normal and profiled RuntimeConfig variants.
+        direction: Invocation direction recorded in the exported trace.
+        profile_placeholder: Device tensor used only to satisfy the disabled
+            native ABI and to identify the allocation device while profiling.
+
+    Returns:
+        Internal launch resources whose lifecycle ends with ``complete`` or
+        ``cancel``.
+    """
+    with _ACTIVE_LOCK:
+        profiler = _ACTIVE_PROFILER
+    if profiler is None or not profiler.is_capture_enabled():
+        return _MegaKernelCall(
+            runtime_config=runtime.normal_tensor,
+            event_counters=None,
+            profile_buffer=profile_placeholder,
+            clear_event_counters=None,
+        )
+    return profiler.acquire_eventless_call(runtime, profile_placeholder, direction)
+
+
+def acquire_eventless_mega_kernel_profile_call(
+    runtime: _PreparedMegaKernelRuntime,
+    *,
+    direction: str,
+    profile_placeholder: Any,
+) -> _MegaKernelCall | None:
+    """Acquire eventless profiling resources only while capture is active.
+
+    Normal launches return ``None`` so latency-sensitive callers can pass the
+    prepared normal RuntimeConfig and placeholder directly without allocating
+    a temporary call object.
+    """
+    profiler = _ACTIVE_PROFILER
+    if profiler is None or not profiler.is_capture_enabled():
+        return None
+    return profiler.acquire_eventless_call(runtime, profile_placeholder, direction)
 
 
 # The argument name intentionally mirrors torch.profiler.profile.

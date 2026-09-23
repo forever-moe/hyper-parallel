@@ -14,6 +14,7 @@
 # ============================================================================
 """Public MegaKernel profiling APIs."""
 
+from hyper_parallel.core.multicore.profiler.mega_gate_trace import export_mega_gate_trace
 from hyper_parallel.core.multicore.profiler.profiler import (
     ProfilerAction,
     mega_kernel_profile,
@@ -21,4 +22,4 @@ from hyper_parallel.core.multicore.profiler.profiler import (
     schedule,
 )
 
-__all__ = ["ProfilerAction", "mega_kernel_profile", "merge_chrome_traces", "schedule"]
+__all__ = ["ProfilerAction", "export_mega_gate_trace", "mega_kernel_profile", "merge_chrome_traces", "schedule"]

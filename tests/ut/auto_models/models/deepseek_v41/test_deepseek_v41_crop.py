@@ -38,6 +38,7 @@ from transformers.models.deepseek_v4.configuration_deepseek_v4 import (
 )
 
 from hyper_parallel import init_empty_weights
+from hyper_parallel.core.multicore.modules.mega_gate import MegaGate
 from hyper_parallel.components.modules.engram import EngramModule
 from hyper_parallel.components.modules.mhc import PipelinedMhcModule
 from hyper_parallel.components.modules.shared_compressed_dsa_attention import (
@@ -472,6 +473,7 @@ class TestDeepseekV41EngramScaling(unittest.TestCase):
         reference_output.loss.backward()
         gradient_names = (
             "model.layers.0.attn_hc.fn",
+            "model.layers.0.mlp.gate.weight",
             "model.layers.1.engram.wkv.weight",
             "model.layers.2.self_attn.q_a_proj.weight",
         )
@@ -501,6 +503,7 @@ class TestDeepseekV41EngramScaling(unittest.TestCase):
         replacement_plan = compile_module_replacements(model, rules)
         apply_module_replacements(model, replacement_plan)
 
+        self.assertTrue(all(isinstance(layer.mlp.gate, MegaGate) for layer in model.model.layers))
         candidate_output = model(input_ids=input_ids, labels=input_ids)
         candidate_output.loss.backward()
 

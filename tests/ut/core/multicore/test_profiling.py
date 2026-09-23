@@ -14,6 +14,8 @@
 # ============================================================================
 """Unit tests for MegaKernel Host profiling metadata and buffer planning."""
 
+from pathlib import Path
+import re
 import struct
 import unittest
 
@@ -22,6 +24,20 @@ from hyper_parallel.core.multicore.modules.mega_moe.forward.graph import build_f
 from hyper_parallel.core.multicore.modules.mega_moe.profiling import (
     MEGA_MOE_PROFILE_OWNER_LABEL,
     _configure_mega_moe_profile_metadata,
+)
+from hyper_parallel.core.multicore.modules.mega_gate.plan import (
+    MEGA_GATE_AIV_WORKER_CAPACITY,
+    MEGA_GATE_ROUTE_GRAD_K1_TASK_TYPES,
+    MEGA_GATE_ROUTE_GRAD_TASK_TYPES,
+    MEGA_GATE_TASK_TYPES,
+    _build_grad_runtime_config,
+    _build_runtime_config as _build_mega_gate_runtime_config,
+    _partition_token_rows,
+)
+from hyper_parallel.core.multicore.modules.mega_gate.profiling import (
+    MEGA_GATE_ROUTE_GRAD_K1_STAGE_NAMES,
+    MEGA_GATE_ROUTE_GRAD_STAGE_NAMES,
+    MEGA_GATE_STAGE_NAMES,
 )
 from hyper_parallel.core.multicore.profiler.profiling import (
     GRAPH_STAGE_DESC_BASE,
@@ -35,6 +51,7 @@ from hyper_parallel.core.multicore.profiler.profiling import (
     _set_mega_kernel_profile_metadata,
 )
 from hyper_parallel.core.multicore.scheduler.config import (
+    EVENT_INVALID_ID,
     INVALID_PROFILE_OWNER_ID,
     RuntimeConfigC,
     TaskDescC,
@@ -322,6 +339,102 @@ class TestMegaKernelProfileLayout(unittest.TestCase):
 
         self.assertEqual(layout.aic_required_records, 258)
         self.assertEqual(layout.aic_record_capacity, 256)
+
+    def test_mega_gate_broadcast_pipeline_uses_ten_records_per_aiv(self):
+        """Size one shared ten-descriptor stream as ten executions on every row shard."""
+        runtime_config = _build_mega_gate_runtime_config()
+
+        layout = _calculate_profile_layout(runtime_config)
+
+        self.assertEqual(runtime_config.task_num, len(MEGA_GATE_TASK_TYPES))
+        self.assertEqual(runtime_config.task_index_num[0], 0)
+        self.assertEqual(runtime_config.task_index_num[1], len(MEGA_GATE_STAGE_NAMES))
+        self.assertEqual(runtime_config.num_workers, MEGA_GATE_AIV_WORKER_CAPACITY)
+        self.assertEqual(layout.aic_required_records, 0)
+        self.assertEqual(layout.aic_record_capacity, 0)
+        self.assertEqual(layout.aiv_required_records, 10)
+        self.assertEqual(layout.aiv_record_capacity, 16)
+        self.assertEqual(layout.buffer_size, 29184)
+
+    def test_mega_gate_task_types_match_device_abi(self):
+        """Keep Python descriptors compatible with the target's scoped C++ enum."""
+        root = Path(__file__).resolve().parents[4]
+        header = root / "hyper_parallel/core/multicore/ops/runtime/runtime_config.hpp"
+        source = header.read_text(encoding="utf-8")
+        self.assertIn("namespace MulticoreRuntime", source)
+        self.assertIn("enum class TaskType : uint32_t", source)
+        device_values = dict(re.findall(r"(TASK_GATE_\w+)\s*=\s*(\d+)", source))
+        for task in (*MEGA_GATE_TASK_TYPES, *MEGA_GATE_ROUTE_GRAD_TASK_TYPES):
+            self.assertEqual(int(device_values[task.name]), int(task))
+
+    def test_mega_gate_grad_pipeline_uses_the_selected_stage_count(self):
+        """Build the eleven-stage RouteGrad descriptor stream."""
+        runtime_config = _build_grad_runtime_config(
+            MEGA_GATE_ROUTE_GRAD_TASK_TYPES,
+            MEGA_GATE_ROUTE_GRAD_STAGE_NAMES,
+            "HyperMegaGateRouteGrad",
+        )
+        expected_count = len(MEGA_GATE_ROUTE_GRAD_TASK_TYPES)
+        layout = _calculate_profile_layout(runtime_config)
+        self.assertEqual(expected_count, 11)
+        self.assertEqual(runtime_config.task_num, expected_count)
+        self.assertEqual(runtime_config.task_index_num[1], expected_count)
+        self.assertEqual(runtime_config.num_workers, MEGA_GATE_AIV_WORKER_CAPACITY)
+        self.assertEqual(layout.aic_record_capacity, 0)
+        self.assertEqual(layout.aiv_record_capacity, 16)
+        expected_stage_ids = list(range(expected_count))
+        actual_stage_ids = [
+            runtime_config.all_tasks[task_id].tiling_data_offset for task_id in range(expected_count)
+        ]
+        self.assertEqual(actual_stage_ids, expected_stage_ids)
+        actual_task_types = [
+            runtime_config.all_tasks[task_id].task_type for task_id in range(expected_count)
+        ]
+        self.assertEqual(actual_task_types, list(MEGA_GATE_ROUTE_GRAD_TASK_TYPES))
+        for task_id in range(expected_count):
+            task = runtime_config.all_tasks[task_id]
+            self.assertEqual(task.trigger_event, EVENT_INVALID_ID)
+            self.assertEqual(task.dependent_event, EVENT_INVALID_ID)
+        metadata = _get_mega_kernel_profile_metadata(runtime_config)
+        self.assertEqual(
+            [metadata.task_stage_names[task_id] for task_id in range(expected_count)],
+            list(MEGA_GATE_ROUTE_GRAD_STAGE_NAMES),
+        )
+
+    def test_mega_gate_k1_grad_pipeline_uses_two_stages(self):
+        """Build the scale-and-zero K=1 RouteGrad descriptor stream."""
+        runtime_config = _build_grad_runtime_config(
+            MEGA_GATE_ROUTE_GRAD_K1_TASK_TYPES,
+            MEGA_GATE_ROUTE_GRAD_K1_STAGE_NAMES,
+            "HyperMegaGateRouteGrad",
+        )
+
+        self.assertEqual(runtime_config.task_num, 2)
+        self.assertEqual(
+            [runtime_config.all_tasks[task_id].task_type for task_id in range(2)],
+            list(MEGA_GATE_ROUTE_GRAD_K1_TASK_TYPES),
+        )
+        metadata = _get_mega_kernel_profile_metadata(runtime_config)
+        self.assertEqual(
+            [metadata.task_stage_names[task_id] for task_id in range(2)],
+            list(MEGA_GATE_ROUTE_GRAD_K1_STAGE_NAMES),
+        )
+
+    def test_mega_gate_dynamic_workers_cover_each_token_once(self):
+        """Mirror Host tiling for small, reduced-core, native, and capped devices."""
+        for tokens, available_workers, expected_workers in (
+            (8, 40, 8),
+            (2048, 16, 16),
+            (2048, 40, 40),
+            (2048, 48, 48),
+            (2048, 64, 48),
+            (41, 40, 21),
+        ):
+            with self.subTest(tokens=tokens, available_workers=available_workers):
+                shards = _partition_token_rows(tokens, available_workers)
+                self.assertEqual(len(shards), expected_workers)
+                covered = [row for row_begin, row_count in shards for row in range(row_begin, row_begin + row_count)]
+                self.assertEqual(covered, list(range(tokens)))
 
     def test_prepared_runtime_serializes_disabled_config_and_lazily_profiles(self):
         """Keep the normal tensor disabled and create the enabled tensor on demand."""

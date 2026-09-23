@@ -14,7 +14,18 @@
 # ============================================================================
 """Torch-only Multicore APIs, separate from the HyperParallel root exports."""
 
-__all__ = ["MegaMoeExperts", "profiler"]
-
 from hyper_parallel.core.multicore import profiler
-from hyper_parallel.core.multicore.modules.mega_moe.module import MegaMoeExperts
+from hyper_parallel.core.multicore.modules.mega_gate.module import MegaGate
+
+__all__ = ["MegaGate", "MegaMoeExperts", "profiler"]
+
+
+def __getattr__(name: str):
+    """Load the optional NPU MoE backend only when its public module is requested."""
+    if name == "MegaMoeExperts":
+        # MegaGate construction and CPU/meta model initialization need no torch_npu.
+        from hyper_parallel.core.multicore.modules.mega_moe.module import MegaMoeExperts
+
+        globals()[name] = MegaMoeExperts
+        return MegaMoeExperts
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

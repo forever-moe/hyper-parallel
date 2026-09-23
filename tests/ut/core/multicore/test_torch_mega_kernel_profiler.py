@@ -204,6 +204,49 @@ class TestTorchMegaKernelProfiler(unittest.TestCase):
         self.assertEqual(event_counters.requested_slices, [])
         mock_empty.assert_not_called()
 
+    def test_inactive_eventless_call_uses_only_the_abi_placeholder(self):
+        """Keep MegaGate free of event storage and profile allocation when capture is off."""
+        runtime = _FakeRuntime()
+        placeholder = _FakeBuffer()
+
+        with patch.object(torch_profiler.torch, "empty") as mock_empty:
+            call = torch_profiler.prepare_eventless_mega_kernel_call(
+                runtime,
+                direction="forward",
+                profile_placeholder=placeholder,
+            )
+
+        self.assertEqual(call.runtime_config, runtime.normal_tensor)
+        self.assertIsNone(call.event_counters)
+        self.assertIsNone(call.clear_event_counters)
+        self.assertIs(call.profile_buffer, placeholder)
+        mock_empty.assert_not_called()
+
+    def test_active_eventless_call_allocates_only_a_profile_buffer(self):
+        """Capture MegaGate without creating or clearing an event-counter tensor."""
+        runtime = _FakeRuntime()
+        placeholder = _FakeBuffer()
+        profile_buffer = _FakeProfileBuffer(b"1000")
+        profiler = torch_profiler.TorchMegaKernelProfiler(
+            schedule=None,
+            on_trace_ready=None,
+            detailed_task_names=False,
+            max_pending_calls=4,
+        )
+
+        with patch.object(torch_profiler.torch, "empty", return_value=profile_buffer):
+            with profiler:
+                call = torch_profiler.prepare_eventless_mega_kernel_call(
+                    runtime,
+                    direction="forward",
+                    profile_placeholder=placeholder,
+                )
+                self.assertEqual(call.runtime_config, runtime.profile_tensor)
+                self.assertIsNone(call.event_counters)
+                self.assertIsNone(call.clear_event_counters)
+                self.assertIs(call.profile_buffer, profile_buffer)
+                call.cancel()
+
     def test_active_window_exports_internal_trace_at_step_boundary(self):
         """Export retained active-window calls when the step closes the window."""
         runtime = _FakeRuntime()

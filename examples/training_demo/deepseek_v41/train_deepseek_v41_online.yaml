@@ -68,6 +68,11 @@ plan_overrides:
     module_type: hyper_parallel.models.deepseek_v41.modeling_deepseek_v41.DeepseekV41PipelinedHyperConnection
     replace_module:
       _target_: hyper_parallel.components.modules.mhc.PipelinedMhcModule
+  - match: "model.layers.*.mlp.gate"
+    module_type: hyper_parallel.models.deepseek_v41.modeling_deepseek_v41.DeepseekV41TopKRouter
+    replace_module:
+      _target_: >-
+        hyper_parallel.models.deepseek_v41.adapter.conversion.module_replacement.replace_deepseek_v41_mega_gate
   - match: "model.layers.*.engram"
     module_type: hyper_parallel.models.deepseek_v41.modeling_deepseek_v41.DeepseekV41Engram
     replace_module:
