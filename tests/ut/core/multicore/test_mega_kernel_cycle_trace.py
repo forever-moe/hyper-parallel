@@ -19,6 +19,7 @@ import unittest
 from hyper_parallel.core.multicore.profiler.profiling import (
     CORE_HEADER,
     CUBE_SLOT_COUNT,
+    GRAPH_STAGE_DESC_BASE,
     INVALID_OWNER_ID,
     PROFILE_RECORD,
     _CycleTraceConfig,
@@ -195,6 +196,67 @@ class TestMegaKernelCycleTrace(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "contains no records"):
             _parse(empty)
+
+    def test_mega_gate_trace_contains_ten_ordered_stages_on_forty_aivs(self):
+        """Decode the 40 row-shard tracks produced from ten shared descriptors."""
+        aic_capacity = 0
+        aiv_capacity = 16
+        buffer = bytearray(
+            _profile_buffer_bytes_for_capacities(aic_capacity, aiv_capacity)
+        )
+        aic_stride = CORE_HEADER.size
+        aiv_stride = CORE_HEADER.size + aiv_capacity * PROFILE_RECORD.size
+        aiv_base = CUBE_SLOT_COUNT * aic_stride
+        stage_names = {
+            GRAPH_STAGE_DESC_BASE + stage: name
+            for stage, name in enumerate(
+                ("Softplus", "Sqrt", "AddBias", "TopK", "Gather", "ReduceSum",
+                 "AddEpsilon", "Div", "MulScale", "CastIndex")
+            )
+        }
+        for worker in range(40):
+            slot = aiv_base + worker * aiv_stride
+            CORE_HEADER.pack_into(
+                buffer, slot, 1000 + worker, 10, 0, 2, worker, aiv_capacity, 0
+            )
+            for stage in range(10):
+                start = 1100 + worker * 100 + stage * 5
+                PROFILE_RECORD.pack_into(
+                    buffer,
+                    slot + CORE_HEADER.size + stage * PROFILE_RECORD.size,
+                    start,
+                    start + 4,
+                    GRAPH_STAGE_DESC_BASE + stage,
+                    stage,
+                    worker,
+                    worker,
+                )
+
+        trace = _parse_cycle_buffer(
+            buffer=buffer,
+            config=_CycleTraceConfig(
+                rank=0,
+                device_id=0,
+                cycle_frequency_mhz=50.0,
+                detailed_task_names=True,
+                kernel_name="HyperMegaGateRoute",
+                owner_label="TokenRowShard",
+                stage_names=stage_names,
+                soc_name="Ascend910B3",
+                task_stage_names={stage: name for stage, name in enumerate(stage_names.values())},
+            ),
+            aic_record_capacity=aic_capacity,
+            aiv_record_capacity=aiv_capacity,
+        )
+        events = [event for event in trace["traceEvents"] if event["ph"] == "X"]
+        metadata = trace["megaKernelCycleTrace"]
+
+        self.assertEqual(len(events), 400)
+        self.assertEqual(len({event["tid"] for event in events}), 40)
+        self.assertEqual(events[30]["name"], "TokenRowShard3_Softplus_task4")
+        self.assertEqual(metadata["recordCount"], 400)
+        self.assertEqual(metadata["droppedRecordCount"], 0)
+        self.assertEqual(metadata["warnings"], [])
 
 
 if __name__ == "__main__":
